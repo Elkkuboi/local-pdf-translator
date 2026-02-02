@@ -2,32 +2,46 @@ import ollama
 import time
 import os
 import re
+import sys
 
-MODEL = "nemotron-3-nano:30b" 
+# Default configuration
+DEFAULT_MODEL = "nemotron-3-nano:30b"
+
+def unload_model(model_name=None):
+    """
+    Forces Ollama to release GPU memory immediately.
+    """
+    target_model = model_name if model_name else DEFAULT_MODEL
+    print(f"[INFO] Unloading model '{target_model}' from GPU memory...")
+    
+    try:
+        ollama.generate(model=target_model, prompt="", keep_alive=0)
+        print("[SUCCESS] GPU memory released.")
+    except Exception as e:
+        print(f"[WARN] Failed to unload model: {e}")
 
 def clean_text_garbage(text):
     """
-    Kevyempi siivous. Poistaa vain ilmiselvät roskat, mutta säästää kaiken mikä voi olla tekstiä.
+    Pre-processes text to remove OCR artifacts.
     """
     lines = text.split('\n')
     cleaned_lines = []
     
+    garbage_words = ["Subscribe", "Join", "Like +", "Discuss", "Privacy Policy", "Sign up", "Cookies"]
+    
     for line in lines:
         stripped = line.strip()
         
-        # SÄILYTÄ KUVAT (tämä oli aiemmin jo korjattu, pidetään se)
+        # Keep image tags
         if stripped.startswith("![") or stripped.startswith("[!["):
             cleaned_lines.append(line)
             continue
             
-        # Poistetaan vain lyhyet roskarivit. 
-        # Jos rivi on pitkä (yli 100 merkkiä), se on todennäköisesti oikeaa tekstiä
-        # vaikka siinä olisi sana "Subscribe".
-        garbage_words = ["Subscribe", "Join", "Like +", "Discuss", "Privacy Policy", "Sign up"]
+        # Remove web garbage
         if any(x in stripped for x in garbage_words) and len(stripped) < 80:
             continue
             
-        # Poistetaan pelkät numerot (esim. sivunumerot), mutta ei jos siinä on tekstiä
+        # Remove isolated numbers
         if re.match(r'^[\d\W_]+$', stripped):
             continue
             
@@ -35,40 +49,45 @@ def clean_text_garbage(text):
         
     return '\n'.join(cleaned_lines)
 
-def translate_chunk(text, chunk_index, total_chunks):
-    # Siivotaan pahimmat, mutta varovasti
+def translate_chunk(text, target_language, model_name, chunk_index):
+    """
+    Translates a single chunk.
+    """
     clean_text = clean_text_garbage(text)
     
     if len(clean_text.strip()) < 5:
-        return text # Palautetaan alkuperäinen jos siivous meni liian pitkälle
+        return text 
 
-    # --- PÄIVITETTY PROMPTI: VÄHEMMÄN AGGRESSIIVINEN ---
     prompt = f"""
-    Käännä oheinen englanninkielinen teksti suomeksi.
+    You are an expert academic translator specializing in computer science and mathematics.
+    Translate the following text into {target_language}.
     
-    OHJEET:
-    1. Tärkein tavoite: ÄLÄ HUKKAA LAUSEITA. Käännä kaikki leipäteksti.
-    2. Jos et ole varma onko jokin otsikko tai metadataa, KÄÄNNÄ SE SILTI.
-    3. Säilytä kuvatagit (![](...)) ja koodilohkot (```) sellaisenaan.
-    4. Älä käännä koodin sisällä olevia komentoja.
-    5. Suomenna sujuvasti, mutta pysy uskollisena alkutekstille.
+    STRICT GUIDELINES:
+    1. GOAL: Translate all body text fluently. Do not summarize.
+    2. AMBIGUITY: If a line looks like metadata, translate it anyway.
+    3. PRESERVATION: 
+       - DO NOT translate code blocks, variable names, or LaTeX equations (e.g., $x$, \\sum).
+       - DO NOT translate Image tags like ![](...). Keep them exactly as is.
+    4. TONE: Use professional, academic {target_language}.
     
-    Käännettävä teksti:
+    TEXT TO TRANSLATE:
     {clean_text}
     """
     
     try:
-        response = ollama.chat(model=MODEL, messages=[
+        response = ollama.chat(model=model_name, messages=[
             {'role': 'user', 'content': prompt},
         ])
         return response['message']['content']
     except Exception as e:
-        print(f"\n❌ Virhe lohkossa {chunk_index}: {e}")
+        print(f"\n[ERROR] Translation failed in chunk {chunk_index}: {e}")
         return text
 
-def create_smart_chunks(text, max_chars=2500): 
-    # Pienensin chunk-kokoa hieman (3000 -> 2500), jotta malli pysyy tarkempana
-    # eikä "unohda" kääntää osia pitkän pätkän alusta tai lopusta.
+def create_smart_chunks(text, max_chars): 
+    """
+    Splits text into semantic chunks.
+    Now accepts max_chars dynamically.
+    """
     paragraphs = text.split('\n\n')
     current_chunk = []
     current_len = 0
@@ -96,19 +115,28 @@ def create_smart_chunks(text, max_chars=2500):
         
     return smart_chunks
 
-def process_markdown_translation(input_file, output_file):
-    print(f"🤖 Aloitetaan käännös mallilla {MODEL} (Sallivampi moodi)...")
+def process_markdown_translation(input_file, output_file, target_language="Finnish", model_name=DEFAULT_MODEL, chunk_size=5000):
+    """
+    Main orchestration function.
+    """
+    print(f"[INFO] Starting translation engine using model: {model_name}")
+    print(f"[INFO] Target Language: {target_language}")
+    print(f"[INFO] Chunk Size: {chunk_size} chars")
     
+    if not os.path.exists(input_file):
+        print(f"[ERROR] Input file not found: {input_file}")
+        return
+
     with open(input_file, 'r', encoding='utf-8') as f:
         content = f.read()
     
-    print(f"📦 Optimoidaan lohkoja...")
-    chunks = create_smart_chunks(content)
+    print(f"[INFO] Optimizing text chunks (Smart Chunking)...")
+    chunks = create_smart_chunks(content, max_chars=chunk_size)
     
     translated_chunks = []
     total = len(chunks)
     
-    print(f"📊 Käännettäviä lohkoja: {total}")
+    print(f"[INFO] Total text chunks to process: {total}")
     
     start_time = time.time()
     
@@ -118,9 +146,10 @@ def process_markdown_translation(input_file, output_file):
         remaining = (total - (i + 1)) * avg_time
         remaining_min = int(remaining // 60)
         
-        print(f"⏳ Käännetään {i+1}/{total} | Arvio jäljellä: {remaining_min} min...", end='\r')
+        print(f"[INFO] Translating chunk {i+1}/{total} | ETA: {remaining_min} min...", end='\r')
         
-        translated = translate_chunk(chunk, i, total)
+        translated = translate_chunk(chunk, target_language, model_name, i)
+        
         if translated:
             translated_chunks.append(translated)
         
@@ -131,18 +160,4 @@ def process_markdown_translation(input_file, output_file):
     with open(output_file, 'w', encoding='utf-8') as f:
         f.write('\n\n'.join(translated_chunks))
     
-    print(f"\n✅ Käännös valmis! Tallennettu: {output_file}")
-
-
-def unload_model():
-    """
-    Pakottaa Ollaman vapauttamaan GPU-muistin heti.
-    """
-    print("🧹 Vapautetaan GPU-muisti...")
-    try:
-        # Lähetetään tyhjä pyyntö, jossa keep_alive on 0. 
-        # Tämä kertoo Ollamalle: "Unohda malli heti".
-        ollama.generate(model=MODEL, prompt="", keep_alive=0)
-        print("✅ GPU-muisti vapautettu.")
-    except Exception as e:
-        print(f"⚠️ Muistin vapautus ei onnistunut (Ollama ehkä jo kiinni): {e}")
+    print(f"\n[SUCCESS] Translation complete! Saved to: {output_file}")
