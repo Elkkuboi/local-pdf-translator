@@ -6,6 +6,8 @@ Research Paper Translator is a local, privacy-focused pipeline designed to conve
 
 This tool is optimized for high-performance GPUs (e.g., NVIDIA RTX 4090/5090) and handles memory management dynamically to prevent OOM (Out of Memory) errors during heavy workloads.
 
+Status: works like poop
+
 ### Key Features
 
 * **Local Processing:** All data remains on your machine. No data is sent to external APIs.
